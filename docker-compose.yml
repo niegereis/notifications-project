@@ -1,0 +1,224 @@
+name: notification-gateway
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-notifications}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-notifications}
+      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-notifications} -d ${POSTGRES_DB:-notifications}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-notifications}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-notifications}
+    ports:
+      - '${RABBITMQ_PORT:-5672}:5672'
+      - '${RABBITMQ_MANAGEMENT_PORT:-15672}:15672'
+      - '${RABBITMQ_PROMETHEUS_PORT:-15692}:15692'
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./docker/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'check_running']
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - '${MAILPIT_SMTP_PORT:-1025}:1025'
+      - '${MAILPIT_UI_PORT:-8025}:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: ./backend
+      target: build
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-notifications}:${POSTGRES_PASSWORD:-notifications}@postgres:5432/${POSTGRES_DB:-notifications}
+    command: sh -c "npm run db:run && npm run db:seed"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build:
+      context: ./backend
+      target: production
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-notifications}:${POSTGRES_PASSWORD:-notifications}@postgres:5432/${POSTGRES_DB:-notifications}
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-notifications}:${RABBITMQ_PASSWORD:-notifications}@rabbitmq:5672
+      API_KEYS: ${API_KEYS:?defina API_KEYS no .env — veja .env.example}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      MAIL_FROM: ${MAIL_FROM:-Notification Gateway <no-reply@notifications.local>}
+      IDEMPOTENCY_TTL_SECONDS: ${IDEMPOTENCY_TTL_SECONDS:-86400}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-10}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM: ${TWILIO_FROM:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL:-}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3000/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: ./backend
+      target: production
+    restart: unless-stopped
+    command: ['node', 'dist/worker.js']
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      METRICS_PORT: 9464
+      DATABASE_URL: postgresql://${POSTGRES_USER:-notifications}:${POSTGRES_PASSWORD:-notifications}@postgres:5432/${POSTGRES_DB:-notifications}
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-notifications}:${RABBITMQ_PASSWORD:-notifications}@rabbitmq:5672
+      API_KEYS: ${API_KEYS:?defina API_KEYS no .env — veja .env.example}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      MAIL_FROM: ${MAIL_FROM:-Notification Gateway <no-reply@notifications.local>}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM: ${TWILIO_FROM:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL:-}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    ports:
+      - '${WORKER_METRICS_PORT:-9464}:9464'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:9464/metrics', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - '${PROMETHEUS_PORT:-9090}:9090'
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9090/-/healthy']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    ports:
+      - '${GRAFANA_PORT:-3030}:3000'
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_API_KEY: ${PANEL_API_KEY:-sk_a78dff27f6c483432ca937d9eceeeb92ebc0a8dbc8c6cb36}
+    restart: unless-stopped
+    ports:
+      - '${PANEL_PORT:-8080}:80'
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:

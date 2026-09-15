@@ -1,0 +1,34 @@
+# dependências
+node_modules/
+
+# build
+dist/
+build/
+*.tsbuildinfo
+
+# Prisma Client gerado a partir do schema
+backend/src/generated/
+
+# testes
+coverage/
+
+# ambiente
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# editores / SO
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ferramentas de IA
+.claude/
+.windsurf/
+.cursor/
+.aider*
