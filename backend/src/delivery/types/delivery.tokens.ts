@@ -1,0 +1,1 @@
+export const DELIVERY_STRATEGIES = Symbol('DELIVERY_STRATEGIES');
