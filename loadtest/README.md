@@ -15,6 +15,10 @@ para o Mailpit. Isso é o desejado: o teste não deve chamar serviço externo.
 
 ## Rodar
 
+Para rodadas completas, `loadtest/run-round.sh <nome>` faz tudo (pré-checagens,
+captura de CPU, k6 e consultas ao banco) e guarda a evidência em
+`loadtest/results/`. Abaixo, os comandos soltos.
+
 Smoke (10s a 5 req/s, confirma que o script e a chave funcionam):
 
 ```bash
@@ -71,7 +75,8 @@ k6 run -e API_KEY=sk_... -e BASE_URL=http://localhost:3000 loadtest/k6/post-noti
 | 2 | pool SMTP no worker (`pool: true`) | sem efeito na vazão: e-mail seguiu em ~20/s (fila de ~19 mil ao fim). Cada envio leva ~43 ms por conexão mesmo reaproveitada, e o consumidor processava uma mensagem por vez |
 | 3 | tentativa de `CONSUMER_PREFETCH=20` (variável não chegou ao worker: rodou **sem limite de prefetch** e pool SMTP de 5) | e-mail a ~111/s (5,5× a rodada 1), `e2e_timeouts` 0, create p95 22 ms. Fila de e-mail drenou ~3 min depois da rampa. `duration_ms` de e-mail ficou inflado (média 55 s: inclui espera na fila do pool) |
 | 4 | `CONSUMER_PREFETCH=20` de verdade (pool SMTP = 20) | e-mail acompanhou a demanda (19.832/min no pico, ~330/s). Entrega p95 210 ms (piso da medição), `e2e_timeouts` 0, `dropped_iterations` 0, create p95 7 ms. Todas as 124 mil `SENT`, filas vazias |
-| 5 | só a rampa: 1000, 2000, 3000 e 4000 req/s (sem mudança de código) | a medir. Objetivo: achar o teto, não otimizar |
+| 5 | só a rampa: até 4000 req/s (sem mudança de código) | **teto da API: ~900-990 req/s** (pico 988/s) e depois queda (803 e 520/s) com a carga acima disso. `create` p95 4,6 s, 457 mil iterações descartadas (k6 no teto de 3000 VUs por causa da latência). Worker acompanhou: 262 mil `SENT`, filas vazias. CPU por container não foi capturada |
+| 6 | 4 réplicas da API atrás de um nginx (mesma rampa até 4000 req/s) | a medir |
 
 Causa da rodada 1: o worker processava uma mensagem por vez (`prefetch(1)`) e cada
 e-mail leva ~43 ms (`delivery_attempts.duration_ms`), o que dá ~20 e-mails/s. O
@@ -200,6 +205,72 @@ entre 1000 e 2000 req/s, porque 20 conexões entregam ~450/s e cada pedido de
 e-mail soma 1/3 da taxa total. Se a API aceitar sem falhas e a fila de e-mail
 crescer, a próxima mudança de uma variável só é subir `CONSUMER_PREFETCH` (e o
 pool junto) para 50 e repetir.
+
+### Rodada 6: escalar a API
+
+A rodada 5 mostrou que uma instância da API satura em ~1000 req/s, com 9 dos 10
+núcleos da máquina ociosos. A API é um único processo Node (um núcleo). A hipótese
+é que o limite é a CPU desse processo e que a vazão sobe quase linearmente com as
+réplicas, até outro componente virar o teto.
+
+Uma variável só: o número de réplicas (4). A rampa é a mesma da rodada 5
+(`LOADTEST_TARGETS=1000,2000,3000,4000`), para comparar direto.
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.scale.yml
+docker compose down -v
+API_REPLICAS=4 docker compose up -d --build --wait api worker lb
+```
+
+O `COMPOSE_FILE` vale só no terminal onde foi exportado; ele inclui o
+[docker-compose.scale.yml](../docker-compose.scale.yml), que tira a porta do host
+da `api`, sobe as réplicas e põe o `lb` ([nginx](../docker/nginx-lb/nginx.conf))
+na porta 3000 e na frente do k6. Se escalar a API depois, reinicie o `lb`
+(`docker compose restart lb`): o nginx resolve os IPs das réplicas na subida.
+
+Confirme que há 4 réplicas e que o balanceador distribui:
+
+```bash
+docker compose ps api --format '{{.Name}} {{.Status}}'
+for i in 1 2 3 4 5 6 7 8; do curl -s -o /dev/null -w '%{http_code} ' http://localhost:3000/health; done; echo
+```
+
+Depois rode tudo com um comando. O script verifica o prefetch, captura o CPU de
+todos os containers durante a rampa e salva a evidência (resumo do k6, CPU, fila e
+entregas por minuto no banco) em `loadtest/results/`:
+
+```bash
+loadtest/run-round.sh rodada-6
+```
+
+O que prever antes de rodar, para não racionalizar depois:
+
+- **API:** com 4 réplicas, a taxa aceita deve passar bem de 1000 req/s (esperado
+  algo entre 2500 e 3500). Se ficar presa em ~1000 mesmo com as 4 réplicas com CPU
+  sobrando, o gargalo não é o núcleo do Node: suspeite do Postgres ou do Redis.
+- **Worker:** a 3000 req/s o e-mail pede ~1000/s, acima dos ~450/s que 20 conexões
+  entregam. É esperado que a fila de e-mail **cresça** nos degraus altos e o
+  `e2e_timeouts` volte a falhar. Isso é o worker virando o gargalo, não um erro do
+  teste, e dita a rodada 7 (`CONSUMER_PREFETCH` e pool maiores, ou mais workers).
+- **k6:** com 4 réplicas e latência baixa, o k6 usa menos VUs; mas a 3000-4000
+  req/s ele disputa CPU com o stack. `dropped_iterations` alto **com** latência de
+  `create` baixa significa que o limite é o gerador, não o sistema.
+
+Como ler o `stats-rodada-6.txt` (CPU de pico, 100% = um núcleo):
+
+| Achado | Leitura |
+| --- | --- |
+| cada `api-N` perto de 100% | a API continua limitada por CPU; mais réplicas ainda ajudam |
+| `api-N` abaixo de ~60% e `create` lento | o gargalo está depois da API (Postgres, Redis, RabbitMQ) |
+| `postgres` perto de 100%+ | o INSERT por pedido virou o limite; avalie pool, índices e `max_connections` |
+| `k6` (container) perto do teto da máquina | limite do gerador de carga |
+
+Limitação: o Prometheus raspa `api:3000`, que resolve para uma réplica por vez,
+então os gráficos da API no Grafana mostram só uma fatia. Use o k6 e o
+`stats-*.txt`.
+
+Para voltar ao modo de uma instância: `unset COMPOSE_FILE` e
+`docker compose down -v && docker compose up -d --build --wait api worker`.
 
 ## Método
 
