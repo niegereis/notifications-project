@@ -11,6 +11,7 @@ backend/src/generated/
 
 # testes
 coverage/
+loadtest/results/
 
 # ambiente
 .env

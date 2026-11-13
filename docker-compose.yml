@@ -218,6 +218,26 @@ services:
       api:
         condition: service_healthy
 
+  # Teste de carga (não sobe com `up`; veja loadtest/README.md):
+  #   docker compose --profile loadtest run --rm k6
+  k6:
+    image: grafana/k6:0.57.0
+    profiles: ['loadtest']
+    command: ['run', '/scripts/post-notifications.js']
+    environment:
+      BASE_URL: http://api:3000
+      API_KEY: ${LOADTEST_API_KEY:-${PANEL_API_KEY:-sk_a78dff27f6c483432ca937d9eceeeb92ebc0a8dbc8c6cb36}}
+      TARGETS: ${LOADTEST_TARGETS:-50,200,500,1000}
+      STAGE_DURATION: ${LOADTEST_STAGE_DURATION:-1m}
+      E2E_RATE: ${LOADTEST_E2E_RATE:-2}
+      SMOKE: ${LOADTEST_SMOKE:-0}
+    volumes:
+      - ./loadtest/k6:/scripts:ro
+      - ./loadtest/results:/results
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   redis-data:

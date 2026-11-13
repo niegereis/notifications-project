@@ -872,6 +872,13 @@ credenciais Twilio e FCM, `WEBHOOK_SECRET` (mínimo 16 caracteres).
 E2e no CI usa `TEST_DATABASE_URL` (banco `notifications_test`), `REDIS_URL` com
 DB `1` e `RABBITMQ_URL` local. O script `pretest:e2e` roda `db:run` nesse URL.
 
+## Teste de carga
+
+Script k6 em `loadtest/k6/post-notifications.js`, rodado pelo perfil `loadtest`
+do Compose (`docker compose --profile loadtest run --rm k6`). Mede a vazão de
+aceitação do `POST /notifications` e o tempo até o desfecho. Detalhes, variáveis
+e método em [`loadtest/README.md`](loadtest/README.md).
+
 ## Banco e migrations
 
 Data source: `backend/src/database/data-source.ts` (CLI TypeORM). Opcoes
