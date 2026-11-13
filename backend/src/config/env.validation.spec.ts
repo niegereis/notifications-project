@@ -32,6 +32,18 @@ describe('validateEnv', () => {
     expect(env.METRICS_PORT).toBeUndefined();
   });
 
+  it('trata SMTP_POOL_MAX_CONNECTIONS vazio (como o compose passa) como não definido', () => {
+    expect(
+      validateEnv({ ...valid, SMTP_POOL_MAX_CONNECTIONS: '' }).SMTP_POOL_MAX_CONNECTIONS,
+    ).toBeUndefined();
+    expect(
+      validateEnv({ ...valid, SMTP_POOL_MAX_CONNECTIONS: '8' }).SMTP_POOL_MAX_CONNECTIONS,
+    ).toBe(8);
+    expect(() => validateEnv({ ...valid, SMTP_POOL_MAX_CONNECTIONS: '0' })).toThrow(
+      /SMTP_POOL_MAX_CONNECTIONS/,
+    );
+  });
+
   it('aceita a porta de métricas do worker', () => {
     const env = validateEnv({ ...valid, METRICS_PORT: '9464' });
 

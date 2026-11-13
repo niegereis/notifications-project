@@ -82,6 +82,13 @@ class EnvironmentVariables {
   @IsString()
   SMTP_SECURE?: string;
 
+  @IsOptional()
+  @Transform(blankNumberToUndefined)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  SMTP_POOL_MAX_CONNECTIONS?: number;
+
   @IsString()
   @IsNotEmpty()
   MAIL_FROM: string;
@@ -140,6 +147,22 @@ export function validateEnv(config: Record<string, unknown>): EnvironmentVariabl
   }
 
   return validated;
+}
+
+// Para campos numéricos: a conversão implícita já transformou '' em 0 quando o
+// Transform roda, então a checagem de "vazio" precisa olhar o valor bruto.
+function blankNumberToUndefined({
+  value,
+  obj,
+  key,
+}: {
+  value: unknown;
+  obj: Record<string, unknown>;
+  key: string;
+}): unknown {
+  const raw = obj[key];
+
+  return typeof raw === 'string' && raw.trim() === '' ? undefined : value;
 }
 
 function blankToUndefined({ value }: { value: unknown }): unknown {

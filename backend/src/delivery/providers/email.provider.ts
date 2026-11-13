@@ -28,6 +28,11 @@ export class EmailProvider implements DeliveryProvider {
       port: configService.getOrThrow<number>('SMTP_PORT'),
       secure: configService.get<string>('SMTP_SECURE') === 'true',
       auth: user && pass ? { user, pass } : undefined,
+      // Reaproveita conexões SMTP em vez de abrir TCP + handshake a cada e-mail.
+      // Várias conexões só rendem se o consumidor processar mensagens em paralelo.
+      pool: true,
+      maxConnections: configService.get<number>('SMTP_POOL_MAX_CONNECTIONS') ?? 5,
+      maxMessages: 1000,
     });
   }
 

@@ -138,6 +138,7 @@ services:
       API_KEYS: ${API_KEYS:?defina API_KEYS no .env — veja .env.example}
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
+      SMTP_POOL_MAX_CONNECTIONS: ${SMTP_POOL_MAX_CONNECTIONS:-}
       MAIL_FROM: ${MAIL_FROM:-Notification Gateway <no-reply@notifications.local>}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
