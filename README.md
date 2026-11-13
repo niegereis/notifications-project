@@ -92,9 +92,12 @@ decorators e `emitDecoratorMetadata`, de que a injeção do Nest depende.
 ```
 .
 ├── .env.example                 # copie para .env antes do compose
-├── docker-compose.yml           # Postgres, Redis, RabbitMQ, Mailpit, migrate, api, worker, web, Prometheus, Grafana
+├── docker-compose.yml           # Postgres, Redis, RabbitMQ, Mailpit, migrate, api, worker, web, Prometheus, Grafana, k6 (perfil loadtest)
+├── docker-compose.scale.yml     # override: API em réplicas atrás de um nginx (teste de carga)
+├── docker-compose.profiling.yml # override: pg_stat_statements no Postgres (teste de carga)
 ├── docker/
 │   ├── postgres/init-test-db.sh # cria o banco notifications_test no primeiro boot
+│   ├── nginx-lb/nginx.conf      # balanceador do override de escala
 │   ├── rabbitmq/enabled_plugins
 │   ├── prometheus/prometheus.yml
 │   └── grafana/                 # datasource + dashboard provisionados
@@ -117,6 +120,7 @@ decorators e `emitDecoratorMetadata`, de que a injeção do Nest depende.
 │   │   └── worker/              # consumer das filas de trabalho
 │   ├── test/                    # e2e (Supertest contra AppModule)
 │   └── Dockerfile               # targets: deps, build, production, development
+├── loadtest/                    # teste de carga (k6), run-round.sh, gráficos e o registro das rodadas
 └── web/                         # mini-painel (formulário + tabela)
     ├── src/
     └── nginx.conf               # proxy /notifications, /auth e /health para a API
@@ -142,7 +146,7 @@ O worker sobe `NestFactory.createApplicationContext` (sem servidor HTTP Nest) e
 expõe só `/metrics` num HTTP mínimo em `METRICS_PORT` (9464).
 
 Os dois habilitam shutdown hooks. A topologia AMQP é declarada na conexão
-(exchanges, filas, bindings, prefetch 1).
+(exchanges, filas, bindings, prefetch por fila, `CONSUMER_PREFETCH`, padrão 1).
 
 ## Arquitetura
 
@@ -169,7 +173,7 @@ fila email          fila sms           fila push
       +------------------+------------------+
                          v
                       Worker
-                         |  prefetch(1), ack manual
+                         |  prefetch por fila (CONSUMER_PREFETCH), ack manual
                          |  lê o registro no Postgres
                          |  DeliveryService escolhe o provedor pelo canal
                          |
@@ -525,6 +529,12 @@ novo.
 Para cadastrar outro evento, insira na tabela `templates` (mesmo `eventType` em
 canais diferentes é permitido; o par evento+canal é que é único).
 
+A API guarda cada template em cache por 60 s (constante `TEMPLATE_CACHE_TTL_MS` em
+`templates.service.ts`, não é variável de ambiente) e pedidos
+simultâneos para o mesmo template compartilham uma única consulta. Um template
+editado no banco leva até 60 s para valer em pedidos novos. Ausência e falha de
+leitura não ficam no cache: um template recém-criado vale na hora.
+
 ## Idempotência
 
 Header `Idempotency-Key`, opcional. Sem o header, cada POST é um pedido novo.
@@ -615,8 +625,12 @@ notificação são gravados na mesma transação.
 
 Declarada em `backend/src/messaging/topology/amqp.topology.ts` e aplicada em
 `AmqpService` na conexão (com reconnect). Publisher confirms: a API só devolve
-`202` depois de o broker confirmar o publish. Consume: `prefetch(1)`, ack
-manual depois de processar.
+`202` depois de o broker confirmar o publish. Consume: prefetch por
+fila (`CONSUMER_PREFETCH`, padrão 1), ack manual depois de processar. Com prefetch
+maior que 1 o worker processa várias mensagens da mesma fila em paralelo; no teste
+de carga, 20 foi o valor em que o e-mail passou de ~20/s para ~330/s (cada envio
+SMTP leva ~43 ms, então a vazão sobe com a concorrência). Prefetch 0 não existe: o
+RabbitMQ o trata como sem limite, e o worker valida 1 a 500.
 
 | Recurso | Tipo | Nome |
 | --- | --- | --- |
@@ -849,6 +863,10 @@ com o nome do campo.
 | `API_KEYS` | billing e crm de exemplo | **obrigatório** no Compose (`:?`) |
 | `IDEMPOTENCY_TTL_SECONDS` | `86400` | |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | |
+| `CONSUMER_PREFETCH` | vazio (= `1`) | mensagens em paralelo por fila no worker, 1 a 500 |
+| `SMTP_POOL_MAX_CONNECTIONS` | vazio (= maior entre 5 e o prefetch) | conexões SMTP simultâneas do worker, 1 a 100 |
+| `API_REPLICAS` | `4` | só com `docker-compose.scale.yml` |
+| `LOADTEST_*` | ver `loadtest/README.md` | rampa, duração e chave do k6 |
 | `TWILIO_*` / `FCM_*` / `WEBHOOK_SECRET` | vazio | opcionais |
 
 ### Processo Node (`DATABASE_URL`, etc.)
@@ -866,6 +884,7 @@ Obrigatorias para API e worker:
 | `SMTP_HOST` / `SMTP_PORT` / `MAIL_FROM` | SMTP |
 
 Opcionais: `METRICS_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_SECURE`,
+`SMTP_POOL_MAX_CONNECTIONS`, `CONSUMER_PREFETCH`,
 `IDEMPOTENCY_TTL_SECONDS`, `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_SECONDS`,
 credenciais Twilio e FCM, `WEBHOOK_SECRET` (mínimo 16 caracteres).
 
@@ -980,6 +999,14 @@ No diretorio `web/`:
 npm run dev                # Vite em :5173
 npm run build              # tsc --noEmit && vite build
 npm run preview
+```
+
+Teste de carga (na raiz do repositório):
+
+```bash
+loadtest/run-round.sh rodada-N     # rodada completa: k6, CPU, filas e consultas em loadtest/results/
+export COMPOSE_FILE=docker-compose.yml:docker-compose.scale.yml      # API em réplicas atrás do nginx
+export COMPOSE_FILE=docker-compose.yml:docker-compose.profiling.yml  # pg_stat_statements ligado
 ```
 
 Imagens:
