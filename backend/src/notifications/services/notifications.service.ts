@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity.js';
 
 import { NotificationStatus } from '../../common/enums/notification-status.enum.js';
 import { DeliveryService } from '../../delivery/services/delivery.service.js';
@@ -85,20 +86,27 @@ export class NotificationsService {
       const payload = dto.payload ?? {};
       const rendered = await this.templates.renderForEvent(dto.eventType, dto.channel, payload);
 
-      const notification = await this.notifications.save(
-        this.notifications.create({
-          channel: dto.channel,
-          eventType: dto.eventType,
-          recipient: dto.recipient,
-          payload,
-          requestedBy,
-          templateId: rendered.templateId,
-          subject: rendered.subject,
-          body: rendered.body,
-          callbackUrl: dto.callbackUrl ?? null,
-          status: NotificationStatus.PENDING,
-        }),
-      );
+      // `insert` em vez de `save`: uma consulta só, sem o START TRANSACTION e o
+      // COMMIT que o `save` abre sozinho. O TypeORM devolve id e createdAt na
+      // própria entidade (RETURNING), então não precisa reler a linha.
+      const notification = this.notifications.create({
+        channel: dto.channel,
+        eventType: dto.eventType,
+        recipient: dto.recipient,
+        payload,
+        requestedBy,
+        templateId: rendered.templateId,
+        subject: rendered.subject,
+        body: rendered.body,
+        callbackUrl: dto.callbackUrl ?? null,
+        status: NotificationStatus.PENDING,
+        failureReason: null,
+        sentAt: null,
+      });
+      // O cast só acalma o tipo do campo jsonb; o objeto é o mesmo, e é nele que o
+      // TypeORM escreve o id e o createdAt devolvidos.
+      await this.notifications.insert(notification as QueryDeepPartialEntity<Notification>);
+      notification.attempts = [];
 
       try {
         await this.publisher.publish(notification);
@@ -125,7 +133,9 @@ export class NotificationsService {
 
       this.metrics.recordAccepted(notification.channel);
 
-      return this.findOne(notification.id, requestedBy);
+      // Pedido novo nunca tem tentativas nem desfecho: a releitura com JOIN em
+      // `delivery_attempts` (duas consultas no TypeORM) devolveria o mesmo.
+      return notification;
     } catch (error) {
       if (key && holdReservation) {
         await this.idempotency.release(requestedBy, key);

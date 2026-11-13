@@ -67,10 +67,12 @@ function buildHarness(
   };
 
   const notifications = {
-    create: (data: Record<string, unknown>) => data,
-    save: (data: Record<string, unknown>) => {
-      created.push(data);
-      return Promise.resolve(persisted);
+    create: (data: Record<string, unknown>) => ({ ...data }),
+    // Como o `insert` do TypeORM: grava e devolve id/createdAt na própria entidade.
+    insert: (data: Record<string, unknown>) => {
+      created.push({ ...data });
+      Object.assign(data, { id: persisted.id, createdAt: new Date('2026-01-01T00:00:00Z') });
+      return Promise.resolve({});
     },
     update: (_criteria: unknown, data: Record<string, unknown>) => {
       updates.push(data);
@@ -189,6 +191,23 @@ describe('NotificationsService', () => {
       subject: 'Bem-vindo(a), Ana!',
       status: NotificationStatus.PENDING,
     });
+  });
+
+  it('devolve o mesmo formato de antes sem reler a linha (sem tentativas, sem desfecho)', async () => {
+    const { service } = buildHarness();
+
+    const notification = await service.create(dto, 'billing');
+
+    expect(notification).toMatchObject({
+      id: NOTIFICATION_ID,
+      status: NotificationStatus.PENDING,
+      requestedBy: 'billing',
+      failureReason: null,
+      sentAt: null,
+      callbackUrl: null,
+      attempts: [],
+    });
+    expect(notification.createdAt).toBeInstanceOf(Date);
   });
 
   it('publica o id na exchange em vez de entregar na hora', async () => {
