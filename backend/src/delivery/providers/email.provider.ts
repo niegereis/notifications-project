@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createTransport, type Transporter } from 'nodemailer';
 
 import { NotificationChannel } from '../../common/enums/notification-channel.enum.js';
+import { positiveInt } from '../../config/positive-int.js';
 import {
   DeliveryError,
   type DeliveryProvider,
@@ -28,10 +29,15 @@ export class EmailProvider implements DeliveryProvider {
       port: configService.getOrThrow<number>('SMTP_PORT'),
       secure: configService.get<string>('SMTP_SECURE') === 'true',
       auth: user && pass ? { user, pass } : undefined,
-      // Reaproveita conexões SMTP em vez de abrir TCP + handshake a cada e-mail.
-      // Várias conexões só rendem se o consumidor processar mensagens em paralelo.
+      // Reaproveita conexões SMTP. Cada envio leva ~43 ms por conexão mesmo com
+      // ela aberta (medido no Mailpit), então a vazão só sobe com envios em
+      // paralelo: o pool acompanha o prefetch do consumidor, senão ele vira o
+      // teto (prefetch 20 com 5 conexões = 5 envios simultâneos).
       pool: true,
-      maxConnections: configService.get<number>('SMTP_POOL_MAX_CONNECTIONS') ?? 5,
+      maxConnections: positiveInt(
+        configService.get('SMTP_POOL_MAX_CONNECTIONS'),
+        Math.max(5, positiveInt(configService.get('CONSUMER_PREFETCH'), 1)),
+      ),
       maxMessages: 1000,
     });
   }

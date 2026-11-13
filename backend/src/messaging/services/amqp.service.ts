@@ -15,6 +15,7 @@ import {
   type RecoveringChannelModel,
 } from 'amqplib';
 
+import { positiveInt } from '../../config/positive-int.js';
 import {
   CONSUMED_CHANNELS,
   DEAD_EXCHANGE,
@@ -145,7 +146,12 @@ export class AmqpService implements OnModuleInit, OnModuleDestroy {
 
   private async onConnected(model: ChannelModel): Promise<void> {
     const channel = await model.createConfirmChannel();
-    await channel.prefetch(1);
+    // Mensagens não confirmadas por consumidor (global=false: o RabbitMQ aplica o
+    // limite a cada fila consumida, não ao canal inteiro). 1 = uma entrega por
+    // vez por fila; valores maiores processam mensagens em paralelo, já que o
+    // dispatch não espera uma terminar para receber a próxima.
+    const prefetch = positiveInt(this.configService.get('CONSUMER_PREFETCH'), 1);
+    await channel.prefetch(prefetch);
     await this.assertTopology(channel);
 
     for (const consumer of this.consumers) {
@@ -154,7 +160,7 @@ export class AmqpService implements OnModuleInit, OnModuleDestroy {
 
     this.channel = channel;
     this.connected = true;
-    this.logger.log('Conectado ao RabbitMQ');
+    this.logger.log(`Conectado ao RabbitMQ (prefetch ${prefetch} por fila)`);
   }
 
   private async assertTopology(channel: ConfirmChannel): Promise<void> {

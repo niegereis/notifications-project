@@ -42,6 +42,18 @@ describe('EmailProvider', () => {
     );
   });
 
+  it('acompanha CONSUMER_PREFETCH quando ele passa de 5', () => {
+    new EmailProvider(configStub({ CONSUMER_PREFETCH: 20 }));
+
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({ maxConnections: 20 }));
+  });
+
+  it('ignora variáveis vazias vindas do compose', () => {
+    new EmailProvider(configStub({ SMTP_POOL_MAX_CONNECTIONS: '', CONSUMER_PREFETCH: '' }));
+
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({ maxConnections: 5 }));
+  });
+
   it('respeita SMTP_POOL_MAX_CONNECTIONS', () => {
     new EmailProvider(configStub({ SMTP_POOL_MAX_CONNECTIONS: 12 }));
 

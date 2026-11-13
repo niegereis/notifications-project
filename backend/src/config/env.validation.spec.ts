@@ -44,6 +44,13 @@ describe('validateEnv', () => {
     );
   });
 
+  it('valida CONSUMER_PREFETCH (vazio = não definido, 1 a 500)', () => {
+    expect(validateEnv({ ...valid, CONSUMER_PREFETCH: '' }).CONSUMER_PREFETCH).toBeUndefined();
+    expect(validateEnv({ ...valid, CONSUMER_PREFETCH: '20' }).CONSUMER_PREFETCH).toBe(20);
+    expect(() => validateEnv({ ...valid, CONSUMER_PREFETCH: '0' })).toThrow(/CONSUMER_PREFETCH/);
+    expect(() => validateEnv({ ...valid, CONSUMER_PREFETCH: '501' })).toThrow(/CONSUMER_PREFETCH/);
+  });
+
   it('aceita a porta de métricas do worker', () => {
     const env = validateEnv({ ...valid, METRICS_PORT: '9464' });
 

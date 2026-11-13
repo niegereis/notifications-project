@@ -139,6 +139,7 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       SMTP_POOL_MAX_CONNECTIONS: ${SMTP_POOL_MAX_CONNECTIONS:-}
+      CONSUMER_PREFETCH: ${CONSUMER_PREFETCH:-}
       MAIL_FROM: ${MAIL_FROM:-Notification Gateway <no-reply@notifications.local>}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}

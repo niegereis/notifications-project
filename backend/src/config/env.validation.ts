@@ -89,6 +89,13 @@ class EnvironmentVariables {
   @Max(100)
   SMTP_POOL_MAX_CONNECTIONS?: number;
 
+  @IsOptional()
+  @Transform(blankNumberToUndefined)
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  CONSUMER_PREFETCH?: number;
+
   @IsString()
   @IsNotEmpty()
   MAIL_FROM: string;
