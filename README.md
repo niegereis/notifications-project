@@ -874,10 +874,33 @@ DB `1` e `RABBITMQ_URL` local. O script `pretest:e2e` roda `db:run` nesse URL.
 
 ## Teste de carga
 
-Script k6 em `loadtest/k6/post-notifications.js`, rodado pelo perfil `loadtest`
-do Compose (`docker compose --profile loadtest run --rm k6`). Mede a vazão de
-aceitação do `POST /notifications` e o tempo até o desfecho. Detalhes, variáveis
-e método em [`loadtest/README.md`](loadtest/README.md).
+Script k6 em `loadtest/k6/post-notifications.js`, rodado pelo perfil `loadtest` do
+Compose (`docker compose --profile loadtest run --rm k6`) ou, para rodadas
+completas com coleta de CPU, filas e consultas, por `loadtest/run-round.sh`.
+Mede a vazão de aceitação do `POST /notifications` e o tempo até a entrega.
+Método, variáveis e o registro de cada rodada em
+[`loadtest/README.md`](loadtest/README.md).
+
+Resumo do que cada rodada mostrou (provedores simulados, k6 e stack na mesma
+máquina de 10 núcleos: os números valem para comparar rodadas, não como capacidade
+absoluta):
+
+| Rodada | O que mudou | Resultado |
+| --- | --- | --- |
+| 1 | baseline | API aceitou 1000 req/s; fila de e-mail com 39 mil mensagens, ~20 e-mails/s |
+| 2 | pool SMTP | sem efeito: o custo não era a conexão (~43 ms por envio) |
+| 3-4 | consumo paralelo (`CONSUMER_PREFETCH`) | e-mail de ~20/s para ~330/s, fila zerada, entrega p95 ~210 ms |
+| 5 | rampa até 4000 req/s | teto de uma instância da API em ~1000 req/s |
+| 6 | 4 réplicas da API | só +36% no pico: a máquina inteira saturou (CPU somada 82-95%) |
+| 7 | API com 2 consultas em vez de 7 | -33% de consultas, -36% de CPU da API, +25% de pedidos aceitos |
+
+![E-mails entregues por minuto, por rodada](loadtest/img/emails-por-minuto.svg)
+
+![Antes e depois da otimização da API](loadtest/img/rodada-7-antes-depois.svg)
+
+Cada correção moveu o gargalo: worker, depois API, depois a máquina e de novo o
+worker. A primeira hipótese (pool SMTP) estava errada e foi derrubada pela
+medição; a causa real era o consumo em série.
 
 ## Banco e migrations
 

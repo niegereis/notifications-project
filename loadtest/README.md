@@ -76,7 +76,9 @@ k6 run -e API_KEY=sk_... -e BASE_URL=http://localhost:3000 loadtest/k6/post-noti
 | 3 | tentativa de `CONSUMER_PREFETCH=20` (variável não chegou ao worker: rodou **sem limite de prefetch** e pool SMTP de 5) | e-mail a ~111/s (5,5× a rodada 1), `e2e_timeouts` 0, create p95 22 ms. Fila de e-mail drenou ~3 min depois da rampa. `duration_ms` de e-mail ficou inflado (média 55 s: inclui espera na fila do pool) |
 | 4 | `CONSUMER_PREFETCH=20` de verdade (pool SMTP = 20) | e-mail acompanhou a demanda (19.832/min no pico, ~330/s). Entrega p95 210 ms (piso da medição), `e2e_timeouts` 0, `dropped_iterations` 0, create p95 7 ms. Todas as 124 mil `SENT`, filas vazias |
 | 5 | só a rampa: até 4000 req/s (sem mudança de código) | **teto da API: ~900-990 req/s** (pico 988/s) e depois queda (803 e 520/s) com a carga acima disso. `create` p95 4,6 s, 457 mil iterações descartadas (k6 no teto de 3000 VUs por causa da latência). Worker acompanhou: 262 mil `SENT`, filas vazias. CPU por container não foi capturada |
-| 6 | 4 réplicas da API atrás de um nginx (mesma rampa até 4000 req/s) | a medir |
+| 6 | 4 réplicas da API atrás de um nginx (mesma rampa até 4000 req/s) | **escalou pouco**: pico de 1.341 req/s (+36% sobre a rodada 5) e 313.748 aceitas (+19%), contra a previsão de 2.500-3.500. A soma do CPU dos containers ficou em mediana de 816% e máximo de 946% de 1000% (10 núcleos): o limite passou a ser a máquina. Worker acumulou 131 mil mensagens. 7 erros 502 por corrida de keepalive no nginx (corrigida) |
+| 7 antes | `pg_stat_statements` ligado; 500, 1000 e 1500 req/s, uma API | 15,0 consultas por notificação (7 na API, 8 no worker) e só 0,38 ms de execução no banco por notificação: o custo está no número de idas e voltas, não em consulta lenta. 152.097 aceitas, pico de 789/s |
+| 7 depois | API faz 2 consultas em vez de 7 (cache de template, `insert`, sem releitura) | 10 consultas por notificação (-33%); CPU da API por 1000 notificações 1,4 para 0,9 s (-36%); 189.872 aceitas (+25%), pico de 1.160/s; `create` mediano de 915 ms para 10 ms. Gargalo passa para o worker: fila de e-mail com 11 mil mensagens ao fim e `e2e` p95 de 6 s para 31 s |
 
 Causa da rodada 1: o worker processava uma mensagem por vez (`prefetch(1)`) e cada
 e-mail leva ~43 ms (`delivery_attempts.duration_ms`), o que dá ~20 e-mails/s. O
@@ -271,6 +273,64 @@ então os gráficos da API no Grafana mostram só uma fatia. Use o k6 e o
 
 Para voltar ao modo de uma instância: `unset COMPOSE_FILE` e
 `docker compose down -v && docker compose up -d --build --wait api worker`.
+
+### Rodada 7: reduzir trabalho por pedido
+
+Com a máquina saturada (rodada 6), escalar mais não ajuda: sobra reduzir o que
+cada pedido custa. Em vez de adivinhar, a rodada usa o `pg_stat_statements`
+(override [docker-compose.profiling.yml](../docker-compose.profiling.yml)); o
+`run-round.sh` o ativa, zera antes da rampa e imprime consultas por notificação,
+tempo de banco por notificação e as consultas mais caras.
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.profiling.yml
+docker compose down -v && docker compose up -d --build --wait api worker
+LOADTEST_TARGETS=500,1000,1500 loadtest/run-round.sh rodada-7-antes
+# aplicar a otimização, recriar com banco limpo e repetir com o nome rodada-7-depois
+```
+
+O que o baseline mostrou: **15 consultas por notificação** e 0,38 ms de execução
+por notificação. O Postgres chegou a 206% de CPU sem nenhuma consulta lenta; o
+custo está nas 2,3 milhões de idas e voltas (protocolo, rede e a montagem de
+entidades do TypeORM). Na API eram 7: template (1), `START TRANSACTION` e `COMMIT`
+do `save` (2), `INSERT` (1), checagem de chave estrangeira (1) e a releitura final
+com `JOIN` (2).
+
+A mudança (commit `perf(api)`): cache de template por 60 s, `insert` no lugar de
+`save`, e sem a releitura (pedido novo não tem tentativas nem desfecho). A resposta
+do `POST` ficou idêntica (testes unitários, e2e e um `POST` real).
+
+| Mesma rampa, uma API | Antes | Depois |
+| --- | --- | --- |
+| Consultas por notificação | 15,0 | 10,0 (*) |
+| CPU da API por 1000 notificações | 1,4 s | 0,9 s (-36%) |
+| CPU do Postgres por 1000 notificações | 1,8 s | 1,2 s (-33%) (**) |
+| Tempo de execução no banco por notificação | 0,384 ms | 0,370 ms |
+| Pedidos aceitos na rampa | 152.097 | 189.872 (+25%) |
+| Pico de pedidos aceitos por segundo | 789 | 1.160 |
+| `create` mediano / p95 | 915 ms / 4,64 s | 10 ms / 3,19 s |
+| Fila de e-mail ao fim da rampa | 23 | 11.270 |
+| `e2e` p95 | 6,3 s | 30,6 s |
+
+(\*) O `pg_stat_statements` mediu 9,67: quando as estatísticas foram coletadas, o
+worker ainda não tinha processado 11 mil mensagens. Com todas processadas são 2 na
+API + 8 no worker = 10.
+
+(\*\*) Subestimado: parte do trabalho do worker e do Postgres acontece depois do fim
+da rampa e não entra nas amostras de CPU.
+
+Como ler isso:
+
+- O **tempo de execução no banco não mudou** (0,384 para 0,370 ms), mas o **CPU do
+  Postgres caiu na mesma proporção das consultas** (-33%). O custo do banco aqui
+  acompanha o número de consultas, não o tempo que cada uma leva.
+- O **`e2e` piorou e o limite `e2e_accept_to_final_ms` passou de ✓ para ✗**, mas não
+  foi regressão: a API passou a aceitar mais, e o worker (um processo) não acompanhou.
+  O gargalo se moveu para ele, como nas rodadas anteriores. O `create` p95 ainda
+  falha nas duas rodadas porque o degrau de 1500 req/s excede de propósito a
+  capacidade de uma instância.
+- Foi **uma rodada de cada**. O número determinístico (consultas por notificação) é
+  exato; os de CPU e vazão trazem a variação normal entre rodadas, que não medi.
 
 ## Método
 
