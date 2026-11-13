@@ -52,6 +52,17 @@ if bad:
 " || exit 1
 
 echo "Mailpit/Postgres/Redis: $(docker compose ps --format '{{.Service}}={{.Health}}' postgres redis rabbitmq mailpit | tr '\n' ' ')"
+
+# pg_stat_statements só existe com o override docker-compose.profiling.yml.
+PGSS=0
+if "${PSQL[@]}" -tAc "show shared_preload_libraries" 2>/dev/null | grep -q pg_stat_statements; then
+  "${PSQL[@]}" -q -c "create extension if not exists pg_stat_statements;" >/dev/null
+  "${PSQL[@]}" -q -tAc "select pg_stat_statements_reset();" >/dev/null
+  PGSS=1
+  echo "pg_stat_statements: ativo e zerado"
+else
+  echo "pg_stat_statements: desligado (use docker-compose.profiling.yml para ver as consultas)"
+fi
 echo
 
 echo "== Rodando $NAME =="
@@ -105,6 +116,36 @@ for q in sorted(json.load(sys.stdin), key=lambda q: q['name']):
   echo
   echo "## Status por canal"
   "${PSQL[@]}" -c "select channel, status, count(*) from notifications group by 1,2 order by 1,2;"
+  if [ "$PGSS" = 1 ]; then
+    echo
+    echo "## Custo no Postgres por notificação criada (pg_stat_statements)"
+    "${PSQL[@]}" -c "
+      with s as (
+        select * from pg_stat_statements
+        where dbid = (select oid from pg_database where datname = current_database())
+          and query not ilike '%pg_stat_statements%'
+      ), n as (select count(*)::numeric as total from notifications)
+      select n.total as notificacoes,
+             sum(s.calls) as consultas,
+             round(sum(s.calls) / n.total, 2) as consultas_por_notif,
+             round((sum(s.total_exec_time) / n.total)::numeric, 3) as ms_de_banco_por_notif
+      from s, n group by n.total;"
+    echo
+    echo "## Consultas mais caras por tempo total"
+    "${PSQL[@]}" -c "
+      with s as (
+        select * from pg_stat_statements
+        where dbid = (select oid from pg_database where datname = current_database())
+          and query not ilike '%pg_stat_statements%'
+      ), n as (select count(*)::numeric as total from notifications)
+      select left(regexp_replace(s.query, '\s+', ' ', 'g'), 100) as consulta,
+             s.calls,
+             round(s.calls / n.total, 2) as por_notif,
+             round(s.total_exec_time::numeric / 1000, 1) as total_s,
+             round(s.mean_exec_time::numeric, 3) as medio_ms,
+             round((100 * s.total_exec_time / sum(s.total_exec_time) over ())::numeric, 1) as pct
+      from s, n order by s.total_exec_time desc limit 14;"
+  fi
 } > "$DB_FILE" 2>&1
 cat "$DB_FILE"
 

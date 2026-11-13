@@ -1,0 +1,21 @@
+# Override que liga o pg_stat_statements no Postgres (rodada 7: onde o banco gasta tempo).
+#
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.profiling.yml
+#   docker compose down -v && docker compose up -d --build --wait api worker
+#   loadtest/run-round.sh rodada-7-antes
+#
+# Combina com o override de escala: COMPOSE_FILE=...:docker-compose.scale.yml:...
+#
+# Fica fora do compose base de propósito: a extensão e o `track_io_timing` têm um
+# custo pequeno mas real, e o stack normal não precisa dele. O `run-round.sh`
+# cria a extensão e zera os contadores antes da rampa.
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
