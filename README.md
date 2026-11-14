@@ -113,7 +113,7 @@ Cada correção moveu o gargalo: worker, API, máquina, worker de novo. A primei
 ## Testes e CI
 
 - **Unitários** (`npm test`): 123 testes, sem Docker.
-- **E2e** (`npm run test:e2e`): 27 testes contra `AppModule`, Postgres, Redis e RabbitMQ reais.
+- **E2e** (`npm run test:e2e`): 30 testes contra `AppModule`, Postgres, Redis e RabbitMQ reais, inclusive um de concorrência (150 pedidos e entregas em paralelo: nenhuma linha invisível na hora do publish, nenhuma entrega em dobro).
 - **Cobertura** (`npm run test:cov`): o CI falha abaixo de 85% (linhas) e 75% (branches).
 - **GitHub Actions:** lint sem warnings, testes com cobertura, e2e, build do painel e das imagens Docker.
 
